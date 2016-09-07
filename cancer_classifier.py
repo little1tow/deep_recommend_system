@@ -20,7 +20,7 @@ flags.DEFINE_string("output_dir", "./tensorboard/",
                     "indicates training output")
 flags.DEFINE_string("model", "deep",
                     "Model to train, option model: deep, linear")
-flags.DEFINE_string("optimizer", "sgd", "optimizer to import")
+flags.DEFINE_string("optimizer", "sgd", "optimizer to train")
 flags.DEFINE_integer('hidden1', 10, 'Number of units in hidden layer 1.')
 flags.DEFINE_integer('hidden2', 20, 'Number of units in hidden layer 2.')
 flags.DEFINE_integer('steps_to_validate', 10,
@@ -78,59 +78,83 @@ validate_batch_labels, validate_batch_features = tf.train.shuffle_batch(
 
 # Define the model
 input_units = FEATURE_SIZE
-hidden1_units = FLAGS.hidden1
-hidden2_units = FLAGS.hidden2
+hidden1_units = 10
+hidden2_units = 20
+hidden3_units = 10
+hidden4_units = 30
 output_units = 2
 
-# Hidden 1
-weights1 = tf.Variable(
-    tf.truncated_normal([input_units, hidden1_units]),
-    dtype=tf.float32,
-    name='weights')
-biases1 = tf.Variable(
-    tf.truncated_normal([hidden1_units]),
-    name='biases',
-    dtype=tf.float32)
-hidden1 = tf.nn.relu(tf.matmul(batch_features, weights1) + biases1)
 
-# Hidden 2
-weights2 = tf.Variable(
-    tf.truncated_normal([hidden1_units, hidden2_units]),
-    dtype=tf.float32,
-    name='weights')
-biases2 = tf.Variable(
-    tf.truncated_normal([hidden2_units]),
-    name='biases',
-    dtype=tf.float32)
-hidden2 = tf.nn.relu(tf.matmul(hidden1, weights2) + biases2)
+def full_connect(inputs, weights_shape, biases_shape):
+    weights = tf.get_variable("weights",
+                              weights_shape,
+                              initializer=tf.random_normal_initializer())
+    biases = tf.get_variable("biases",
+                             biases_shape,
+                             initializer=tf.random_normal_initializer())
+    return tf.matmul(inputs, weights) + biases
 
-# Linear
-weights3 = tf.Variable(
-    tf.truncated_normal([hidden2_units, output_units]),
-    dtype=tf.float32,
-    name='weights')
-biases3 = tf.Variable(
-    tf.truncated_normal([output_units]),
-    name='biases',
-    dtype=tf.float32)
-logits = tf.matmul(hidden2, weights3) + biases3
 
+def full_connect_relu(inputs, weights_shape, biases_shape):
+    return tf.nn.relu(full_connect(inputs, weights_shape, biases_shape))
+
+
+def inference(inputs):
+    '''
+    Shape of inputs should be [batch_size, input_units], return shape [batch_size, output_units]
+    '''
+    with tf.variable_scope("layer1"):
+        layer = full_connect_relu(inputs, [input_units, hidden1_units],
+                                  [hidden1_units])
+    with tf.variable_scope("layer2"):
+        layer = full_connect_relu(layer, [hidden1_units, hidden2_units],
+                                  [hidden2_units])
+    with tf.variable_scope("layer3"):
+        layer = full_connect_relu(layer, [hidden2_units, hidden3_units],
+                                  [hidden3_units])
+    with tf.variable_scope("layer4"):
+        layer = full_connect_relu(layer, [hidden3_units, hidden4_units],
+                                  [hidden4_units])
+    with tf.variable_scope("outpu"):
+        layer = full_connect(layer, [hidden4_units, output_units],
+                             [output_units])
+    return layer
+
+
+logits = inference(batch_features)
 batch_labels = tf.to_int64(batch_labels)
 cross_entropy = tf.nn.sparse_softmax_cross_entropy_with_logits(logits,
                                                                batch_labels)
 loss = tf.reduce_mean(cross_entropy, name='xentropy_mean')
+
 if FLAGS.optimizer == "sgd":
     optimizer = tf.train.GradientDescentOptimizer(learning_rate)
+elif FLAGS.optimizer == "momentum":
+    # optimizer = tf.train.MomentumOptimizer(learning_rate)
+    print("Not support optimizer: {} yet, exit now".format(FLAGS.optimizer))
+    exit(1)
+elif FLAGS.optimizer == "adadelta":
+    optimizer = tf.train.AdadeltaOptimizer(learning_rate)
+elif FLAGS.optimizer == "adagrad":
+    optimizer = tf.train.AdagradOptimizer(learning_rate)
+elif FLAGS.optimizer == "adagradda":
+    optimizer = tf.train.AdagradDAOptimizer(learning_rate)
+elif FLAGS.optimizer == "adam":
+    optimizer = tf.train.AdamOptimizer(learning_rate)
+elif FLAGS.optimizer == "ftrl":
+    optimizer = tf.train.FtrlOptimizer(learning_rate)
+elif FLAGS.optimizer == "rmsprop":
+    optimizer = tf.train.RMSPropOptimizer(learning_rate)
 else:
-    optimizer = tf.train.MomentumOptimizer(learning_rate)
+    print("Unknow optimizer: {}, exit now".format(FLAGS.optimizer))
+    exit(1)
+
 global_step = tf.Variable(0, name='global_step', trainable=False)
 train_op = optimizer.minimize(loss, global_step=global_step)
 
 # Compute accuracy
-accuracy_hidden1 = tf.nn.relu(tf.matmul(validate_batch_features, weights1) +
-                              biases1)
-accuracy_hidden2 = tf.nn.relu(tf.matmul(accuracy_hidden1, weights2) + biases2)
-accuracy_logits = tf.matmul(accuracy_hidden2, weights3) + biases3
+tf.get_variable_scope().reuse_variables()
+accuracy_logits = inference(validate_batch_features)
 validate_softmax = tf.nn.softmax(accuracy_logits)
 validate_batch_labels = tf.to_int64(validate_batch_labels)
 correct_prediction = tf.equal(
@@ -150,12 +174,8 @@ _, auc_op = tf.contrib.metrics.streaming_auc(validate_softmax,
                                              new_validate_batch_labels)
 
 # Define inference op
-inference_features = tf.placeholder("float", [None, 9])
-inference_hidden1 = tf.nn.relu(tf.matmul(inference_features, weights1) +
-                               biases1)
-inference_hidden2 = tf.nn.relu(tf.matmul(inference_hidden1, weights2) +
-                               biases2)
-inference_logits = tf.matmul(inference_hidden2, weights3) + biases3
+inference_features = tf.placeholder("float", [None, FEATURE_SIZE])
+inference_logits = inference(inference_features)
 inference_softmax = tf.nn.softmax(inference_logits)
 inference_op = tf.argmax(inference_softmax, 1)
 
@@ -169,9 +189,9 @@ tf.scalar_summary('auc', auc_op)
 saver = tf.train.Saver()
 keys_placeholder = tf.placeholder("float")
 keys = tf.identity(keys_placeholder)
-tf.add_to_collection("inputs", json.dumps(
-    {'key': keys_placeholder.name,
-     'features': inference_features.name}))
+tf.add_to_collection("inputs", json.dumps({'key': keys_placeholder.name,
+                                           'features':
+                                           inference_features.name}))
 tf.add_to_collection("outputs", json.dumps({'key': keys.name,
                                             'softmax': inference_softmax.name,
                                             'prediction': inference_op.name}))
@@ -204,6 +224,7 @@ with tf.Session() as sess:
                         [accuracy, auc_op, summary_op])
                     print("Step: {}, loss: {}, accuracy: {}, auc: {}".format(
                         step, loss_value, accuracy_value, auc_value))
+
                     writer.add_summary(summary_value, step)
                     saver.save(sess,
                                "./checkpoint/checkpoint.ckpt",
